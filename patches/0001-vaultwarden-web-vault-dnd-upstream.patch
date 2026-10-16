@@ -1,0 +1,373 @@
+commit 72fd40b7b144266fc1f75d139426523c8d807fa9
+Author: Realmagnum <realmagnum@gmail.com>
+Date:   Thu Oct 15 03:02:58 2026 +0300
+
+    feat(web): drag-drop organizational records between collections
+    
+    Add drag-and-drop support for moving vault items between collections in
+    the self-hosted Bitwarden Web Vault client.
+    
+    - vault-cipher-row.component.ts: draggable=true, dragstart/dragend handlers
+    - vault-filter-section.component.ts/html: drop-zone for collection tree
+    - webpack.base.js: reduce source-map memory pressure during build
+    
+    Refs: feature/drag-drop branch on Realmagnum/bw_web_builds
+
+diff --git a/apps/web/src/app/vault/components/vault-items/vault-cipher-row.component.ts b/apps/web/src/app/vault/components/vault-items/vault-cipher-row.component.ts
+index 15148e1288..0964a53693 100644
+--- a/apps/web/src/app/vault/components/vault-items/vault-cipher-row.component.ts
++++ b/apps/web/src/app/vault/components/vault-items/vault-cipher-row.component.ts
+@@ -6,6 +6,7 @@ import {
+   EventEmitter,
+   HostListener,
+   inject,
++  output,
+   Input,
+   OnInit,
+   Output,
+@@ -47,7 +48,12 @@ import { RowHeightClass } from "./vault-items.component";
+   selector: "tr[appVaultCipherRow]",
+   templateUrl: "vault-cipher-row.component.html",
+   standalone: false,
+-  host: { class: "tw-group/cipher-row" },
++  host: {
++    class: "tw-group/cipher-row",
++    "[attr.draggable]": "!disabled && !decryptionFailure && !isDeleted",
++    "(dragstart)": "onDragStart($event)",
++    "(dragend)": "onDragEnd($event)",
++  },
+ })
+ export class VaultCipherRowComponent<C extends CipherViewLike> implements OnInit {
+   private readonly vfo1TerminologyService = inject(Vfo1TerminologyService);
+@@ -540,6 +546,36 @@ export class VaultCipherRowComponent<C extends CipherViewLike> implements OnInit
+     this.onEvent.emit({ type: "editCipher", item: this.cipher });
+   }
+ 
++  readonly dragStart = output<{ cipher: C; event: DragEvent }>();
++  readonly dragEnd = output<void>();
++
++  protected onDragStart(event: DragEvent) {
++    if (this.disabled || this.decryptionFailure || this.isDeleted) {
++      event.preventDefault();
++      return;
++    }
++
++    const payload = JSON.stringify({
++      cipherId: this.cipher.id,
++      cipherName: this.cipher.name,
++      organizationId: this.cipher.organizationId || null,
++      collectionIds: this.cipher.collectionIds || [],
++      folderId: this.cipher.folderId || null,
++    });
++    event.dataTransfer?.setData("application/json", payload);
++    event.dataTransfer?.setData("text/plain", this.cipher.name || "");
++    if (event.dataTransfer) {
++      event.dataTransfer.effectAllowed = "move";
++    }
++    (event.currentTarget as HTMLElement)?.classList.add("tw-opacity-50");
++    this.dragStart.emit({ cipher: this.cipher as C, event });
++  }
++
++  protected onDragEnd(event: DragEvent) {
++    (event.currentTarget as HTMLElement)?.classList.remove("tw-opacity-50");
++    this.dragEnd.emit();
++  }
++
+   @HostListener("contextmenu", ["$event"])
+   protected onRightClick(event: MouseEvent) {
+     if (event.shiftKey && event.ctrlKey) {
+diff --git a/apps/web/src/app/vault/individual-vault/vault-filter/shared/components/vault-filter-section.component.html b/apps/web/src/app/vault/individual-vault/vault-filter/shared/components/vault-filter-section.component.html
+index ff4d5fc2dc..2de0eff8d4 100644
+--- a/apps/web/src/app/vault/individual-vault/vault-filter/shared/components/vault-filter-section.component.html
++++ b/apps/web/src/app/vault/individual-vault/vault-filter/shared/components/vault-filter-section.component.html
+@@ -60,8 +60,12 @@
+           <li
+             [ngClass]="{
+               active: isNodeSelected(f),
++              'tw-bg-primary-100 tw-border-l-4 tw-border-secondary': isDragOver(f.node.id),
+             }"
+             class="filter-option"
++            (dragover)="$event.preventDefault(); $event.stopPropagation(); onFilterDragOver($event, f)"
++            (dragleave)="$event.stopPropagation(); onFilterDragLeave($event, f)"
++            (drop)="$event.stopPropagation(); onFilterDrop($event, f)"
+           >
+             <span class="filter-buttons">
+               @if (f.children.length) {
+diff --git a/apps/web/src/app/vault/individual-vault/vault-filter/shared/components/vault-filter-section.component.ts b/apps/web/src/app/vault/individual-vault/vault-filter/shared/components/vault-filter-section.component.ts
+index 0c28008239..c44fcdbee7 100644
+--- a/apps/web/src/app/vault/individual-vault/vault-filter/shared/components/vault-filter-section.component.ts
++++ b/apps/web/src/app/vault/individual-vault/vault-filter/shared/components/vault-filter-section.component.ts
+@@ -1,14 +1,19 @@
+ // FIXME: Update this file to be type safe and remove this and next line
+ // @ts-strict-ignore
+-import { Component, computed, inject, input, InjectionToken, Injector, Input } from "@angular/core";
++import { Component, computed, inject, input, InjectionToken, Injector, Input, output } from "@angular/core";
+ import { toObservable, toSignal } from "@angular/core/rxjs-interop";
+ import { firstValueFrom, Observable } from "rxjs";
+ import { map, switchMap } from "rxjs/operators";
+ 
+ import { Organization } from "@bitwarden/common/admin-console/models/domain/organization";
++import { CollectionService } from "@bitwarden/admin-console/common";
+ import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+ import { getUserId } from "@bitwarden/common/auth/services/account.service";
++import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
++import { CipherId, CollectionId, OrganizationId } from "@bitwarden/common/types/guid";
++import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
+ import { ITreeNodeObject, TreeNode } from "@bitwarden/common/vault/models/domain/tree-node";
++import { DialogService, ToastService } from "@bitwarden/components";
+ import {
+   VaultFilterServiceAbstraction as VaultFilterService,
+   VaultFilterSection,
+@@ -16,6 +21,7 @@ import {
+   VaultFilter,
+ } from "@bitwarden/vault";
+ 
++import { AssignCollectionsWebComponent } from "../../../../components/assign-collections/assign-collections-web.component";
+ import { CoachmarkService } from "../../../../components/coachmark";
+ 
+ // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
+@@ -71,10 +77,18 @@ export class VaultFilterSectionComponent {
+ 
+   private injectors = new Map<string, Injector>();
+ 
++  readonly dragStarted = output<boolean>();
++  private draggingCipherId?: CipherId;
++
+   constructor(
+     private vaultFilterService: VaultFilterService,
+     private injector: Injector,
+     private accountService: AccountService,
++    private cipherService: CipherService,
++    private collectionService: CollectionService,
++    private dialogService: DialogService,
++    private toastService: ToastService,
++    private i18nService: I18nService,
+   ) {}
+ 
+   isNodeSelected(filterNode: TreeNode<VaultFilterType>) {
+@@ -144,5 +158,212 @@ export class VaultFilterSectionComponent {
+     }
+     return inject;
+   }
++
++  protected draggedOverNodeId: string | null = null;
++
++  isDragOver(nodeId: string): boolean {
++    return this.draggedOverNodeId === nodeId;
++  }
++
++  onFilterDragOver(event: DragEvent, filterNode: TreeNode<VaultFilterType>) {
++    if (!filterNode?.node?.id) {
++      return;
++    }
++    if (event.dataTransfer?.types.includes("application/json")) {
++      event.preventDefault();
++      event.dataTransfer.dropEffect = "move";
++      this.draggedOverNodeId = filterNode.node.id;
++    }
++  }
++
++  onFilterDragLeave(event: DragEvent, filterNode: TreeNode<VaultFilterType>) {
++    if (this.draggedOverNodeId === filterNode?.node?.id) {
++      this.draggedOverNodeId = null;
++    }
++  }
++
++  async onFilterDrop(event: DragEvent, filterNode: TreeNode<VaultFilterType>) {
++    event.preventDefault();
++    this.draggedOverNodeId = null;
++
++    const rawData = event.dataTransfer?.getData("application/json");
++    if (!rawData) {
++      return;
++    }
++
++    let dragData: {
++      cipherId: string;
++      cipherName: string;
++      organizationId: string | null;
++      collectionIds: string[];
++      folderId: string | null;
++    };
++    try {
++      dragData = JSON.parse(rawData);
++    } catch {
++      return;
++    }
++
++    if (!dragData?.cipherId) {
++      return;
++    }
++
++    const userId = await firstValueFrom(this.activeUserId$);
++    if (!userId) {
++      return;
++    }
++
++    const targetNode = filterNode.node;
++    const targetId = targetNode.id;
++    const targetName = targetNode.name;
++
++    // 1. Dropping onto Collections
++    if (this.isCollectionFilter) {
++      if (targetId === "AllCollections") {
++        return;
++      }
++      const targetOrgId = (targetNode as any).organizationId as OrganizationId;
++      const targetReadOnly = (targetNode as any).readOnly;
++
++      if (targetReadOnly) {
++        this.toastService.showToast({
++          variant: "error",
++          title: this.i18nService.t("errorOccurred"),
++          message: this.i18nService.t("readOnly"),
++        });
++        return;
++      }
++
++      // 1a. Same organization move: Org A -> Org A
++      if (dragData.organizationId && targetOrgId && dragData.organizationId === targetOrgId) {
++        try {
++          // Add to target collection
++          await this.cipherService.bulkUpdateCollectionsWithServer(
++            targetOrgId,
++            userId,
++            [dragData.cipherId as CipherId],
++            [targetId as CollectionId],
++            false,
++          );
++
++          // If active filter is another collection (and not AllCollections), remove from previous collection
++          const activeColId = this.activeFilter?.collectionId;
++          if (activeColId && activeColId !== targetId && activeColId !== "AllCollections") {
++            await this.cipherService.bulkUpdateCollectionsWithServer(
++              targetOrgId,
++              userId,
++              [dragData.cipherId as CipherId],
++              [activeColId as CollectionId],
++              true,
++            );
++          }
++
++          this.toastService.showToast({
++            variant: "success",
++            title: null,
++            message: `"${dragData.cipherName}" → "${targetName}"`,
++          });
++        } catch (e: any) {
++          this.toastService.showToast({
++            variant: "error",
++            title: this.i18nService.t("errorOccurred"),
++            message: String(e?.message || e),
++          });
++        }
++        return;
++      }
++
++      // 1b. Personal item to Organization collection (ownership transfer)
++      if (!dragData.organizationId && targetOrgId) {
++        const cipherView = await firstValueFrom(
++          this.cipherService.cipherView$(userId, dragData.cipherId as CipherId),
++        );
++        if (!cipherView) {
++          return;
++        }
++
++        const allCollections = await firstValueFrom(
++          this.collectionService.decryptedCollections$(userId),
++        );
++        const availableCollections = allCollections.filter((c) => c.organizationId === targetOrgId);
++
++        AssignCollectionsWebComponent.open(this.dialogService, {
++          data: {
++            ciphers: [cipherView],
++            organizationId: targetOrgId,
++            availableCollections,
++            activeCollection: targetNode as any,
++          },
++        });
++        return;
++      }
++
++      // 1c. Different organizations: Org A -> Org B (disallowed)
++      if (dragData.organizationId && targetOrgId && dragData.organizationId !== targetOrgId) {
++        this.toastService.showToast({
++          variant: "error",
++          title: this.i18nService.t("errorOccurred"),
++          message: "Cannot move items between different organizations directly.",
++        });
++        return;
++      }
++    }
++
++    // 2. Dropping onto Organization (in organizationFilter)
++    if (this.isOrganizationFilter() && targetId && targetId !== "MyVault" && targetId !== "AllVaults") {
++      if (!dragData.organizationId) {
++        const cipherView = await firstValueFrom(
++          this.cipherService.cipherView$(userId, dragData.cipherId as CipherId),
++        );
++        if (!cipherView) {
++          return;
++        }
++
++        const allCollections = await firstValueFrom(
++          this.collectionService.decryptedCollections$(userId),
++        );
++        const availableCollections = allCollections.filter((c) => c.organizationId === targetId);
++
++        AssignCollectionsWebComponent.open(this.dialogService, {
++          data: {
++            ciphers: [cipherView],
++            organizationId: targetId as OrganizationId,
++            availableCollections,
++          },
++        });
++        return;
++      } else if (dragData.organizationId !== targetId) {
++        this.toastService.showToast({
++          variant: "error",
++          title: this.i18nService.t("errorOccurred"),
++          message: "Cannot move items between different organizations directly.",
++        });
++        return;
++      }
++    }
++
++    // 3. Dropping onto Personal Folders
++    const isFolderFilter = !this.isCollectionFilter && !this.isOrganizationFilter();
++    if (isFolderFilter && targetId) {
++      if (targetId === "none" || targetId === "AllFolders") {
++        return;
++      }
++      try {
++        await this.cipherService.moveManyWithServer([dragData.cipherId], targetId, userId);
++        this.toastService.showToast({
++          variant: "success",
++          title: null,
++          message: `"${dragData.cipherName}" → "${targetName}"`,
++        });
++      } catch (e: any) {
++        this.toastService.showToast({
++          variant: "error",
++          title: this.i18nService.t("errorOccurred"),
++          message: String(e?.message || e),
++        });
++      }
++      return;
++    }
++  }
+ }
+ export const OptionsInput = new InjectionToken<Observable<VaultFilterType>>("OptionsInput");
+diff --git a/apps/web/webpack.base.js b/apps/web/webpack.base.js
+index 41ac625e1d..01f1d94a7c 100644
+--- a/apps/web/webpack.base.js
++++ b/apps/web/webpack.base.js
+@@ -380,7 +380,7 @@ module.exports.buildConfig = function buildConfig(params) {
+ 
+   const webpackConfig = {
+     mode: NODE_ENV,
+-    devtool: "source-map",
++    devtool: false,
+     devServer: devServer,
+     target: "web",
+     entry: {

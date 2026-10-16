@@ -1,0 +1,16 @@
+# OS & editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Build artifacts & logs
+*.tar.gz
+*.log
+web-vault-custom/
+node_modules/
+dist/
+build/

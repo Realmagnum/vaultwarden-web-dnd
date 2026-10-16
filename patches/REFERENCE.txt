@@ -1,0 +1,30 @@
+# Патчи Drag-and-Drop для Vaultwarden Web Vault
+
+## Как применить
+
+### Способ 1: накатить патч
+```bash
+cd ~/opt/bw_web_builds/web-vault
+git checkout main
+patch -p1 < ../vaultwarden-web-dnd/patches/0001-vaultwarden-dnd-full.patch
+```
+
+### Способ 2: применить коммит напрямую
+```bash
+git apply ../vaultwarden-web-dnd/patches/0001-vaultwarden-dnd-full.patch
+```
+
+## Что внутри
+
+Файл `0001-vaultwarden-dnd-full.patch` — это **полная ревизия коммита** `72fd40b` с ветки `feature/drag-drop`, которая включает все изменения:
+
+| Файл | Строк +/- | Назначение |
+|------|-----------|------------|
+| `vault-cipher-row.component.ts` | +38 / -3 | Draggable=true, dragstart/dragend эмиттеры |
+| `vault-filter-section.component.ts` | +223 | Логика drop-zone, dragover, перемещение записей |
+| `vault-filter-section.component.html` | +4 / -1 | Разметка зоны сброса в дереве коллекций |
+| `webpack.base.js` | +1 | Оптимизация source-map для сборки |
+
+## Совместимость
+
+Патч написан для версии **Vaultwarden Web Vault 1.37.3**. Рекомендуется проверять применимость к новым версиям перед использованием.
